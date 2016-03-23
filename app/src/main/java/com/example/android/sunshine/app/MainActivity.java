@@ -17,6 +17,9 @@ package com.example.android.sunshine.app;
 
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.preference.PreferenceManager;
@@ -35,20 +38,53 @@ import com.example.android.sunshine.app.gcm.RegistrationIntentService;
 import com.example.android.sunshine.app.sync.SunshineSyncAdapter;
 import com.google.android.gms.common.ConnectionResult;
 import com.google.android.gms.common.GoogleApiAvailability;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.PendingResult;
+import com.google.android.gms.wearable.Asset;
+import com.google.android.gms.wearable.DataApi;
+import com.google.android.gms.wearable.DataEventBuffer;
+import com.google.android.gms.wearable.PutDataMapRequest;
+import com.google.android.gms.wearable.PutDataRequest;
+import com.google.android.gms.wearable.Wearable;
 
-public class MainActivity extends AppCompatActivity implements ForecastFragment.Callback {
+import java.io.ByteArrayOutputStream;
 
-    private final String LOG_TAG = MainActivity.class.getSimpleName();
+public class MainActivity extends AppCompatActivity implements ForecastFragment.Callback,
+        DataApi.DataListener,
+        GoogleApiClient.ConnectionCallbacks,
+        GoogleApiClient.OnConnectionFailedListener {
+
+    public static final String SENT_TOKEN_TO_SERVER = "sentTokenToServer";
     private static final String DETAILFRAGMENT_TAG = "DFTAG";
     private final static int PLAY_SERVICES_RESOLUTION_REQUEST = 9000;
-    public static final String SENT_TOKEN_TO_SERVER = "sentTokenToServer";
-
+    private static final int INDEX_WEATHER_ID = 0;
+    private static final int INDEX_MAX_TEMP = 1;
+    private static final int INDEX_MIN_TEMP = 2;
+    private static final int INDEX_SHORT_DESC = 3;
+    private static final String[] NOTIFY_WEATHER_PROJECTION = new String[]{
+            WeatherContract.WeatherEntry.COLUMN_WEATHER_ID,
+            WeatherContract.WeatherEntry.COLUMN_MAX_TEMP,
+            WeatherContract.WeatherEntry.COLUMN_MIN_TEMP,
+            WeatherContract.WeatherEntry.COLUMN_SHORT_DESC
+    };
+    private final String LOG_TAG = MainActivity.class.getSimpleName();
+    int weatherId;
+    double high;
+    double low;
+    String desc;
     private boolean mTwoPane;
     private String mLocation;
+    private GoogleApiClient mGoogleApiClient;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mGoogleApiClient = new GoogleApiClient.Builder(this)
+                .addApi(Wearable.API)
+                .addConnectionCallbacks(this)
+                .addOnConnectionFailedListener(this)
+                .build();
+
         mLocation = Utility.getPreferredLocation(this);
         Uri contentUri = getIntent() != null ? getIntent().getData() : null;
 
@@ -106,7 +142,43 @@ public class MainActivity extends AppCompatActivity implements ForecastFragment.
                 Intent intent = new Intent(this, RegistrationIntentService.class);
                 startService(intent);
             }
+
+            // Data for wear
+            String locationQuery = Utility.getPreferredLocation(getApplicationContext());
+            Uri weatherUri = WeatherContract.WeatherEntry.buildWeatherLocationWithDate(locationQuery, System.currentTimeMillis());
+            Cursor cursor = getContentResolver().query(weatherUri, NOTIFY_WEATHER_PROJECTION, null, null, null);
+            if (cursor.moveToFirst()) {
+                weatherId = cursor.getInt(INDEX_WEATHER_ID);
+                high = cursor.getDouble(INDEX_MAX_TEMP);
+                low = cursor.getDouble(INDEX_MIN_TEMP);
+                desc = cursor.getString(INDEX_SHORT_DESC);
+
+                PutDataMapRequest putDataMapReq = PutDataMapRequest.create("/sunshine");
+                putDataMapReq.getDataMap().putInt("weatherId", weatherId);
+                putDataMapReq.getDataMap().putDouble("high", high);
+                putDataMapReq.getDataMap().putDouble("low", low);
+                putDataMapReq.getDataMap().putString("desc", desc);
+
+                int artResourceForWeatherCondition = Utility.getArtResourceForWeatherCondition(weatherId);
+                Bitmap bitmap = BitmapFactory.decodeResource(getApplicationContext().getResources(), artResourceForWeatherCondition);
+                ByteArrayOutputStream byteStream = new ByteArrayOutputStream();
+                bitmap.compress(Bitmap.CompressFormat.PNG, 100, byteStream);
+                Asset asset = Asset.createFromBytes(byteStream.toByteArray());
+                if (asset != null) {
+                    putDataMapReq.getDataMap().putAsset("icon", asset);
+                }
+
+                PutDataRequest putDataReq = putDataMapReq.asPutDataRequest();
+                PendingResult<DataApi.DataItemResult> pendingResult =
+                        Wearable.DataApi.putDataItem(mGoogleApiClient, putDataReq);
+            }
         }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        mGoogleApiClient.connect();
     }
 
     @Override
@@ -135,7 +207,9 @@ public class MainActivity extends AppCompatActivity implements ForecastFragment.
     @Override
     protected void onResume() {
         super.onResume();
-        String location = Utility.getPreferredLocation( this );
+        mGoogleApiClient.connect();
+
+        String location = Utility.getPreferredLocation(this);
         // update the location in our second pane using the fragment manager
             if (location != null && !location.equals(mLocation)) {
             ForecastFragment ff = (ForecastFragment)getSupportFragmentManager().findFragmentById(R.id.fragment_forecast);
@@ -148,6 +222,13 @@ public class MainActivity extends AppCompatActivity implements ForecastFragment.
             }
             mLocation = location;
         }
+    }
+
+    @Override
+    protected void onPause() {
+        super.onPause();
+        Wearable.DataApi.removeListener(mGoogleApiClient, this);
+        mGoogleApiClient.disconnect();
     }
 
     @Override
@@ -195,5 +276,25 @@ public class MainActivity extends AppCompatActivity implements ForecastFragment.
             return false;
         }
         return true;
+    }
+
+    @Override
+    public void onConnectionSuspended(int i) {
+
+    }
+
+    @Override
+    public void onConnectionFailed(ConnectionResult connectionResult) {
+
+    }
+
+    @Override
+    public void onConnected(Bundle bundle) {
+        Wearable.DataApi.addListener(mGoogleApiClient, this);
+    }
+
+    @Override
+    public void onDataChanged(DataEventBuffer dataEventBuffer) {
+
     }
 }
